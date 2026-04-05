@@ -28,7 +28,7 @@ use std::time::{Instant, Duration};
 type IcedElement<'a> = Element<'a, Message, Theme, IcedRenderer>;
 
 fn main() -> Result<(), winit::error::EventLoopError> {
-    // Inicjalizacja systemu logowania (tracing)
+    // Initialize tracing for logging
     tracing_subscriber::fmt::init();
 
     let event_loop = EventLoop::new()?;
@@ -52,7 +52,7 @@ impl OnyxApp {
 }
 
 impl ApplicationHandler for OnyxApp {
-    // Wywoływane, gdy aplikacja zostaje wznowiona lub uruchomiona
+    // Triggered when the application is resumed or started
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_none() {
             let window_attrs = WindowAttributes::default()
@@ -62,23 +62,23 @@ impl ApplicationHandler for OnyxApp {
             let window = Arc::new(
                 event_loop
                     .create_window(window_attrs)
-                    .expect("Nie udało się utworzyć okna"),
+                    .expect("Failed to create window"),
             );
 
-            // Inicjalizacja stanu renderowania (asynchronicznie)
+            // Async initialization of the render state
             match pollster::block_on(RenderState::new(window)) {
                 Ok(render_state) => {
                     self.state = Some(render_state);
                 }
                 Err(e) => {
-                    tracing::error!("Inicjalizacja grafiki nie powiodła się: {:?}", e);
+                    tracing::error!("Graphics initialization failed: {:?}", e);
                     event_loop.exit();
                 }
             }
         }
     }
 
-    // Obsługa zdarzeń okna
+    // Handle window-specific events
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -90,7 +90,7 @@ impl ApplicationHandler for OnyxApp {
             None => return,
         };
 
-        // Konwersja zdarzeń winit na zdarzenia zrozumiałe dla biblioteki Iced
+        // Convert winit events to Iced-compatible events
         if let Some(iced_event) = conversion::window_event(
             event.clone(),
             state.window.scale_factor() as f32,
@@ -118,22 +118,22 @@ impl ApplicationHandler for OnyxApp {
             }
 
             WindowEvent::RedrawRequested => {
-                // Aktualizacja interfejsu użytkownika
+                // Update UI logic and messages
                 state.update_ui(&mut self.controls);
                 
-                // Aktualizacja licznika FPS w tytule okna
+                // Update FPS counter in the window title
                 state.update_fps_title();
 
-                // Renderowanie ramki
+                // Render the frame
                 if let Err(e) = state.render(&mut self.controls) {
                     match e {
                         wgpu::SurfaceError::Lost => state.resize(state.window.inner_size()),
                         wgpu::SurfaceError::OutOfMemory => event_loop.exit(),
-                        _ => tracing::error!("Błąd renderowania: {:?}", e),
+                        _ => tracing::error!("Render error: {:?}", e),
                     }
                 }
 
-                // Zapytanie o ponowne odrysowanie (pętla renderowania)
+                // Request next frame
                 state.window.request_redraw();
             }
 
@@ -142,7 +142,7 @@ impl ApplicationHandler for OnyxApp {
     }
 }
 
-// ======================= RenderState (Stan Renderowania) =======================
+// ======================= RenderState =======================
 
 struct RenderState {
     window: Arc<Window>,
@@ -158,7 +158,7 @@ struct RenderState {
     events: Vec<Event>,
     modifiers: ModifiersState,
 
-    // Pola do obsługi pomiaru klatek na sekundę (FPS)
+    // Timing fields for FPS calculation
     last_fps_update: Instant,
     frame_count: u32,
 }
@@ -169,7 +169,7 @@ impl RenderState {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone())?;
 
-        // Wybór adaptera graficznego (preferowana wysoka wydajność)
+        // Request a high-performance graphics adapter
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -178,10 +178,10 @@ impl RenderState {
             })
             .await?;
 
-        // Żądanie urządzenia logicznego i kolejki poleceń
+        // Request logical device and command queue
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Urządzenie renderujące Onyx"),
+                label: Some("Onyx Render Device"),
                 ..Default::default()
             })
             .await?;
@@ -189,13 +189,13 @@ impl RenderState {
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps.formats[0];
 
-        // Konfiguracja powierzchni renderowania
+        // Configure surface for rendering
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Immediate, // Tryb Immediate odblokowuje FPS (brak V-Sync)
+            present_mode: wgpu::PresentMode::Immediate, // Immediate mode for unlocked FPS
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -208,7 +208,7 @@ impl RenderState {
             window.scale_factor() as f32,
         );
 
-        // Inicjalizacja silnika Iced
+        // Initialize Iced engine
         let engine = Engine::new(
             &adapter,
             device.clone(),
@@ -238,7 +238,7 @@ impl RenderState {
         })
     }
 
-    /// Przelicza FPS i aktualizuje tytuł okna co sekundę
+    /// Calculates FPS and updates window title every second
     fn update_fps_title(&mut self) {
         self.frame_count += 1;
         let elapsed = self.last_fps_update.elapsed();
@@ -252,7 +252,7 @@ impl RenderState {
         }
     }
 
-    /// Obsługa zmiany rozmiaru okna
+    /// Handles window resizing
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.config.width = new_size.width;
@@ -266,7 +266,7 @@ impl RenderState {
         }
     }
 
-    /// Przetwarzanie zdarzeń interfejsu i aktualizacja jego stanu logicznego
+    /// Updates the UI state by processing queued events
     fn update_ui(&mut self, controls: &mut Controls) {
         if self.events.is_empty() {
             return;
@@ -280,7 +280,7 @@ impl RenderState {
             &mut self.iced_renderer,
         );
 
-        // Przekazanie zdarzeń do interfejsu Iced
+        // Process Iced events
         interface.update(
             &self.events,
             self.cursor,
@@ -291,25 +291,25 @@ impl RenderState {
         self.events.clear();
         self.cache = interface.into_cache();
 
-        // Przetworzenie wiadomości zwrotnych z interfejsu
+        // Process produced messages back in the control logic
         for msg in messages {
             controls.update(msg);
         }
     }
 
-    /// Renderowanie końcowej klatki obrazu
+    /// Renders the scene and UI onto the surface
     fn render(&mut self, controls: &mut Controls) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Główny enkoder renderowania"),
+            label: Some("Main Render Encoder"),
         });
 
-        // Czyszczenie tła
+        // Clear background
         {
             let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Czyszczenie tła"),
+                label: Some("Clear Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -325,10 +325,10 @@ impl RenderState {
             });
         }
 
-        // Wysłanie poleceń czyszczenia do kolejki
+        // Submit clear commands
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Budowa i rysowanie interfejsu Iced
+        // Draw Iced interface
         let mut interface = UserInterface::build(
             controls.view(),
             self.viewport.logical_size(),
@@ -345,7 +345,7 @@ impl RenderState {
 
         self.cache = interface.into_cache();
         
-        // Wyświetlenie narysowanego interfejsu na ekranie
+        // Present UI onto the current frame view
         self.iced_renderer.present(None, self.format, &view, &self.viewport);
 
         frame.present();
@@ -353,7 +353,7 @@ impl RenderState {
     }
 }
 
-// ======================= Interface (Interfejs i Logika) =======================
+// ======================= UI Logic =======================
 
 #[derive(Debug, Clone)]
 pub enum Message {}
@@ -366,11 +366,11 @@ impl Controls {
     }
 
     pub fn update(&mut self, _message: Message) {
-        // Tutaj trafia obsługa logiki po kliknięciu przycisków itp.
+        // Handle UI interaction logic here
     }
 
     pub fn view(&self) -> IcedElement<'_> {
-        // Definicja wyglądu interfejsu
+        // Define UI layout
         container(text("Onyx Engine").size(32).color([0.8, 0.8, 0.8]))
             .width(Length::Fill)
             .height(Length::Fill)

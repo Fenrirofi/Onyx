@@ -1,13 +1,28 @@
 [package]
-name = "onyx"
+name    = "onyx"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = { git = "https://github.com/iced-rs/iced", features = ["advanced"]}
+# iced stack – pull everything from git so versions are always in sync
+iced       = { git = "https://github.com/iced-rs/iced", features = ["advanced", "canvas"] }
 iced_winit = { git = "https://github.com/iced-rs/iced" }
-iced_wgpu = { git = "https://github.com/iced-rs/iced" }
-pollster = "0.4.0"
+iced_wgpu  = { git = "https://github.com/iced-rs/iced" }
+
+# wgpu must match what iced_wgpu re-exports internally.
+# Pin to 28 so the Surface / TextureFormat APIs used in main.rs compile.
 wgpu = "28.0.0"
-tracing-subscriber = "0.3.23"
-tracing = "0.1.44"
+
+# Async executor for block_on in RenderState::new
+pollster = "0.4.0"
+
+# Node graph – UUID for every node / connection / port
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Serialisation – Graph::to_json / from_json
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = "0.3"

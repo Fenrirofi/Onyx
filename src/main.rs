@@ -1,381 +1,159 @@
-use iced::{
-    Element, Length, Theme, mouse,
-    widget::{container, text},
-};
+use iced::{Background, Border, Color, Element, Font, Length, Padding, font::Family, widget::*};
 
-use iced_wgpu::{
-    Engine, Renderer as IcedRenderer,
-    graphics::{Shell, Viewport},
-};
+fn main() -> iced::Result {
+    iced::application(OnyxApp::default, OnyxApp::update, OnyxApp::view)
+        .font(include_bytes!("../assets/fonts/Switzer-Regular.otf").as_slice())
+        .run()
+}
 
-use iced_winit::{
-    conversion,
-    core::{Event, Size, renderer},
-    runtime::{UserInterface, user_interface},
-    winit::{
-        self,
-        application::ApplicationHandler,
-        event::WindowEvent,
-        event_loop::{ActiveEventLoop, EventLoop},
-        keyboard::ModifiersState,
-        window::{Window, WindowAttributes, WindowId},
-    },
-};
+const BG_PRIM: Color = Color::from_rgb8(38, 38, 38);
+const BG_SECO: Color = Color::from_rgb8(34, 34, 34);
+const SEPA_CO: Color = Color::from_rgb8(27, 27, 27);
+const CT_PRIM: Color = Color::from_rgb8(179, 179, 179);
+// const CT_SECO: Color = Color::from_rgb8(r, g, b);
 
-use std::sync::Arc;
-use std::time::{Instant, Duration};
-
-type IcedElement<'a> = Element<'a, Message, Theme, IcedRenderer>;
-
-fn main() -> Result<(), winit::error::EventLoopError> {
-    // Initialize tracing for logging
-    tracing_subscriber::fmt::init();
-
-    let event_loop = EventLoop::new()?;
-    let mut app = OnyxApp::new();
-
-    event_loop.run_app(&mut app)
+#[derive(Debug, Clone)]
+enum Message {
+    PaneResized(pane_grid::ResizeEvent),
 }
 
 struct OnyxApp {
-    state: Option<RenderState>,
-    controls: Controls,
+    panes: pane_grid::State<Pane>,
+}
+
+impl Default for OnyxApp {
+    fn default() -> Self {
+        OnyxApp::new()
+    }
 }
 
 impl OnyxApp {
     fn new() -> Self {
-        Self {
-            state: None,
-            controls: Controls::new(),
-        }
-    }
-}
+        let (mut panes, node_pane) = pane_grid::State::new(Pane::new(PanelType::NodeGraph));
 
-impl ApplicationHandler for OnyxApp {
-    // Triggered when the application is resumed or started
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_none() {
-            let window_attrs = WindowAttributes::default()
-                .with_title("Onyx")
-                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        let (preview_3d_pane, _) = panes
+            .split(
+                pane_grid::Axis::Horizontal,
+                node_pane,
+                Pane::new(PanelType::Preview3D),
+            )
+            .expect("Pierwszy podział nie udał się");
 
-            let window = Arc::new(
-                event_loop
-                    .create_window(window_attrs)
-                    .expect("Failed to create window"),
-            );
-
-            // Async initialization of the render state
-            match pollster::block_on(RenderState::new(window)) {
-                Ok(render_state) => {
-                    self.state = Some(render_state);
-                }
-                Err(e) => {
-                    tracing::error!("Graphics initialization failed: {:?}", e);
-                    event_loop.exit();
-                }
-            }
-        }
-    }
-
-    // Handle window-specific events
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        let state = match self.state.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Convert winit events to Iced-compatible events
-        if let Some(iced_event) = conversion::window_event(
-            event.clone(),
-            state.window.scale_factor() as f32,
-            state.modifiers,
-        ) {
-            state.events.push(iced_event);
-        }
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-
-            WindowEvent::Resized(new_size) => {
-                state.resize(new_size);
-            }
-
-            WindowEvent::ModifiersChanged(new_modifiers) => {
-                state.modifiers = new_modifiers.state();
-            }
-
-            WindowEvent::CursorMoved { position, .. } => {
-                state.cursor = mouse::Cursor::Available(conversion::cursor_position(
-                    position,
-                    state.window.scale_factor() as f32,
-                ));
-            }
-
-            WindowEvent::RedrawRequested => {
-                // Update UI logic and messages
-                state.update_ui(&mut self.controls);
-                
-                // Update FPS counter in the window title
-                state.update_fps_title();
-
-                // Render the frame
-                if let Err(e) = state.render(&mut self.controls) {
-                    match e {
-                        wgpu::SurfaceError::Lost => state.resize(state.window.inner_size()),
-                        wgpu::SurfaceError::OutOfMemory => event_loop.exit(),
-                        _ => tracing::error!("Render error: {:?}", e),
-                    }
-                }
-
-                // Request next frame
-                state.window.request_redraw();
-            }
-
-            _ => {}
-        }
-    }
-}
-
-// ======================= RenderState =======================
-
-struct RenderState {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    format: wgpu::TextureFormat,
-    viewport: Viewport,
-    iced_renderer: IcedRenderer,
-    cache: user_interface::Cache,
-    cursor: mouse::Cursor,
-    events: Vec<Event>,
-    modifiers: ModifiersState,
-
-    // Timing fields for FPS calculation
-    last_fps_update: Instant,
-    frame_count: u32,
-}
-
-impl RenderState {
-    async fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        let size = window.inner_size();
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone())?;
-
-        // Request a high-performance graphics adapter
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
-
-        // Request logical device and command queue
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Onyx Render Device"),
-                ..Default::default()
-            })
-            .await?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps.formats[0];
-
-        // Configure surface for rendering
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Immediate, // Immediate mode for unlocked FPS
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
-        surface.configure(&device, &config);
-
-        let viewport = Viewport::with_physical_size(
-            Size::new(size.width, size.height),
-            window.scale_factor() as f32,
+        let _ = panes.split(
+            pane_grid::Axis::Vertical,
+            preview_3d_pane,
+            Pane::new(PanelType::Preview2D),
         );
 
-        // Initialize Iced engine
-        let engine = Engine::new(
-            &adapter,
-            device.clone(),
-            queue.clone(),
-            format,
-            None,
-            Shell::headless(),
-        );
+        OnyxApp { panes }
+    }
 
-        let iced_renderer = IcedRenderer::new(engine, renderer::Settings::default());
+    fn update(&mut self, message: Message) {
+        match message {
+            Message::PaneResized(event) => {
+                self.panes.resize(event.split, event.ratio);
+            }
+        }
+    }
 
-        Ok(Self {
-            window,
-            surface,
-            device,
-            queue,
-            config,
-            format,
-            viewport,
-            iced_renderer,
-            cache: user_interface::Cache::new(),
-            cursor: mouse::Cursor::Unavailable,
-            events: Vec::new(),
-            modifiers: ModifiersState::default(),
-            last_fps_update: Instant::now(),
-            frame_count: 0,
+    fn view(&self) -> Element<'_, Message> {
+        let grid = pane_grid(&self.panes, |_id, pane, _is_maximized| {
+            pane_grid::Content::new(self.draw_panel(pane))
         })
-    }
-
-    /// Calculates FPS and updates window title every second
-    fn update_fps_title(&mut self) {
-        self.frame_count += 1;
-        let elapsed = self.last_fps_update.elapsed();
-
-        if elapsed >= Duration::from_secs(1) {
-            let fps = self.frame_count as f32 / elapsed.as_secs_f32();
-            self.window.set_title(&format!("Onyx - FPS: {:.1}", fps));
-            
-            self.last_fps_update = Instant::now();
-            self.frame_count = 0;
-        }
-    }
-
-    /// Handles window resizing
-    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
-
-            self.viewport = Viewport::with_physical_size(
-                Size::new(new_size.width, new_size.height),
-                self.window.scale_factor() as f32,
-            );
-        }
-    }
-
-    /// Updates the UI state by processing queued events
-    fn update_ui(&mut self, controls: &mut Controls) {
-        if self.events.is_empty() {
-            return;
-        }
-
-        let mut messages = Vec::new();
-        let mut interface = UserInterface::build(
-            controls.view(),
-            self.viewport.logical_size(),
-            std::mem::take(&mut self.cache),
-            &mut self.iced_renderer,
-        );
-
-        // Process Iced events
-        interface.update(
-            &self.events,
-            self.cursor,
-            &mut self.iced_renderer,
-            &mut messages,
-        );
-
-        self.events.clear();
-        self.cache = interface.into_cache();
-
-        // Process produced messages back in the control logic
-        for msg in messages {
-            controls.update(msg);
-        }
-    }
-
-    /// Renders the scene and UI onto the surface
-    fn render(&mut self, controls: &mut Controls) -> Result<(), wgpu::SurfaceError> {
-        let frame = self.surface.get_current_texture()?;
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Main Render Encoder"),
-        });
-
-        // Clear background
-        {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02, g: 0.02, b: 0.03, a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-        }
-
-        // Submit clear commands
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        // Draw Iced interface
-        let mut interface = UserInterface::build(
-            controls.view(),
-            self.viewport.logical_size(),
-            std::mem::take(&mut self.cache),
-            &mut self.iced_renderer,
-        );
-
-        interface.draw(
-            &mut self.iced_renderer,
-            &Theme::Dark,
-            &renderer::Style::default(),
-            self.cursor,
-        );
-
-        self.cache = interface.into_cache();
         
-        // Present UI onto the current frame view
-        self.iced_renderer.present(None, self.format, &view, &self.viewport);
+        .on_resize(10.0, |event| Message::PaneResized(event));
 
-        frame.present();
-        Ok(())
-    }
-}
-
-// ======================= UI Logic =======================
-
-#[derive(Debug, Clone)]
-pub enum Message {}
-
-pub struct Controls;
-
-impl Controls {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn update(&mut self, _message: Message) {
-        // Handle UI interaction logic here
-    }
-
-    pub fn view(&self) -> IcedElement<'_> {
-        // Define UI layout
-        container(text("Onyx Engine").size(32).color([0.8, 0.8, 0.8]))
+        container(grid)
             .width(Length::Fill)
             .height(Length::Fill)
+            .into()
+    }
+
+    fn draw_panel(&self, pane: &Pane) -> Element<'_, Message> {
+        let content: Element<'_, Message> = match pane.panel_type {
+            PanelType::NodeGraph => container(text("h").size(14)).into(),
+            PanelType::Preview3D => {
+                container(button("C")).into()
+            }
+            PanelType::Preview2D => container(text("Text")).into(),
+        };
+
+        self.panel_style(pane.panel_type, content)
+    }
+
+    fn panel_style<'a>(
+        &self,
+        variant: PanelType,
+        content: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let title = match variant {
+            PanelType::NodeGraph => "Node Editor",
+            PanelType::Preview3D => "Preview 3D",
+            PanelType::Preview2D => "Preview 2D",
+        };
+
+        let header = container(
+            text(title)
+                .size(14)
+                .font(Font {
+                    family: Family::Name("Switzer"),
+                    weight: iced::font::Weight::Medium,
+                    ..Default::default()
+                })
+                .color(CT_PRIM),
+        )
+        .width(Length::Fill)
+        .padding(Padding::default().left(22).bottom(4).top(4))
+        .style(|_theme| container::Style {
+            background: Some(BG_PRIM.into()),
+            ..Default::default()
+        });
+
+        iced::widget::column![
+            header,
+            container(
+                container(content)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(BG_SECO)),
+
+                        border: Border {
+                            width: 1.5,
+                            color: SEPA_CO,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(2)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .into()
+            .style(|_| container::Style {
+                background: Some(Background::Color(BG_PRIM)),
+                ..Default::default()
+            })
+        ]
+        .into()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PanelType {
+    NodeGraph,
+    Preview3D,
+    Preview2D,
+}
+
+#[derive(Debug)] 
+struct Pane {
+    pub panel_type: PanelType,
+}
+
+impl Pane {
+    fn new(panel_type: PanelType) -> Self {
+        Self { panel_type }
     }
 }

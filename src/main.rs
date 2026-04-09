@@ -5,6 +5,7 @@
 use iced::font::Family;
 use iced::mouse::{Cursor, Interaction};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Program, Stroke, Text as CanvasText};
+use iced::widget::mouse_area;
 use iced::{
     Alignment, Background, Border, Color, Element, Event, Font, Length, Padding, Point, Rectangle,
     Size, Subscription, Task, Theme, Vector, event, keyboard, mouse,
@@ -982,6 +983,7 @@ pub enum PortSide {
     Output,
 }
 
+#[derive(Debug)]
 pub struct CanvasCaches {
     pub wires: canvas::Cache,
 }
@@ -1956,6 +1958,9 @@ pub enum Message {
     KeyPressed(keyboard::Key),
     MinimapJump(Point),
     ToggleMinimap,
+    ResizeSplitterPressed(ResizeSide), // <-- bez pozycji, pobieramy z last_mouse_pos
+    ResizeSplitterMoved(f32),
+    ResizeSplitterReleased,
 }
 
 #[derive(Debug, Clone)]
@@ -1970,6 +1975,7 @@ pub enum CanvasMsg {
     Scrolled(Point, mouse::ScrollDelta),
 }
 
+#[derive(Debug)]
 pub struct OnyxApp {
     pub panes: pane_grid::State<Pane>,
     pub graph: Graph,
@@ -1984,6 +1990,23 @@ pub struct OnyxApp {
     pub ctrl_held: bool,
     pub shift_held: bool,
     pub show_minimap: bool,
+    pub left_panel_width: f32,
+    pub right_panel_width: f32,
+    pub resize_state: Option<ResizeState>,
+    pub last_mouse_pos: Point, // <-- NOWE: śledzenie pozycji myszy
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResizeSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResizeState {
+    pub side: ResizeSide,
+    pub start_mouse_x: f32,
+    pub start_width: f32,
 }
 
 impl Default for OnyxApp {
@@ -2042,6 +2065,10 @@ impl OnyxApp {
             ctrl_held: false,
             shift_held: false,
             show_minimap: true,
+            left_panel_width: 250.0,
+            right_panel_width: 300.0,
+            resize_state: None,
+            last_mouse_pos: Point::ORIGIN, // <-- inicjalizacja
         }
     }
 
@@ -2066,7 +2093,16 @@ impl OnyxApp {
     pub fn subscription(&self) -> Subscription<Message> {
         event::listen().map(|e| match e {
             Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => Message::KeyPressed(key),
-            _ => Message::KeyPressed(keyboard::Key::Named(keyboard::key::Named::F35)),
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                // Aktualizujemy pozycję myszy i wysyłamy komunikat o ruchu
+                // (używamy Message::ResizeSplitterMoved tylko jeśli jesteśmy w trakcie przeciągania,
+                // ale wysyłamy zawsze, a w update sprawdzamy stan)
+                Message::ResizeSplitterMoved(position.x)
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                Message::ResizeSplitterReleased
+            }
+            _ => Message::KeyPressed(keyboard::Key::Named(keyboard::key::Named::F35)), // ignorowane
         })
     }
 
@@ -2194,6 +2230,42 @@ impl OnyxApp {
             }
             Message::Undo | Message::Redo => {
                 self.status = "Undo/Redo jeszcze niezaimplementowane.".into();
+            }
+
+            Message::ResizeSplitterPressed(side) => {
+                // Używamy ostatniej znanej pozycji myszy jako punktu startowego
+                let mouse_x = self.last_mouse_pos.x;
+                let start_width = match side {
+                    ResizeSide::Left => self.left_panel_width,
+                    ResizeSide::Right => self.right_panel_width,
+                };
+                self.resize_state = Some(ResizeState {
+                    side,
+                    start_mouse_x: mouse_x,
+                    start_width,
+                });
+            }
+
+            Message::ResizeSplitterMoved(mouse_x) => {
+                // Aktualizujemy globalną pozycję myszy
+                self.last_mouse_pos.x = mouse_x;
+
+                if let Some(state) = &self.resize_state {
+                    let delta = mouse_x - state.start_mouse_x;
+                    let new_width = match state.side {
+                        ResizeSide::Left => (state.start_width + delta).max(150.0).min(500.0),
+                        // Dla prawego panelu: przesunięcie w lewo (ujemna delta) zwiększa szerokość
+                        ResizeSide::Right => (state.start_width - delta).max(200.0).min(600.0),
+                    };
+                    match state.side {
+                        ResizeSide::Left => self.left_panel_width = new_width,
+                        ResizeSide::Right => self.right_panel_width = new_width,
+                    }
+                }
+            }
+
+            Message::ResizeSplitterReleased => {
+                self.resize_state = None;
             }
         }
         Task::none()
@@ -2614,21 +2686,200 @@ impl OnyxApp {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let grid = pane_grid(&self.panes, |_id, pane, _is_maximized| {
+        // Lewy panel
+        let left_panel = self.view_left_panel();
+        // Środkowy obszar z pane_grid
+        let center = pane_grid(&self.panes, |_id, pane, _is_maximized| {
             pane_grid::Content::new(self.draw_panel(pane))
         })
-        .on_resize(10, |event| Message::PaneResized(event));
-    
-        let status_bar = self.view_statusbar();
-    
-        column![
-            container(grid)
-                .width(Length::Fill)
-                .height(Length::Fill),
-            status_bar
+        .on_resize(10, |event| Message::PaneResized(event))
+        .width(Length::Fill)
+        .height(Length::Fill);
+        // Prawy panel
+        let right_panel = self.view_right_panel();
+
+        // Splittery
+        let left_splitter = self.create_splitter(ResizeSide::Left);
+        let right_splitter = self.create_splitter(ResizeSide::Right);
+
+        // Główny wiersz z panelami i splitterami
+        let main_row = row![
+            container(left_panel).width(Length::Fixed(self.left_panel_width)),
+            left_splitter,
+            container(center).width(Length::Fill),
+            right_splitter,
+            container(right_panel).width(Length::Fixed(self.right_panel_width)),
         ]
-        .spacing(0)
+        .height(Length::Fill);
+
+        let status_bar = self.view_statusbar();
+
+        column![main_row, status_bar].spacing(0).into()
+    }
+
+    fn view_left_panel(&self) -> Element<'_, Message> {
+        // Przykład: używamy istniejącego sidebaru (biblioteka węzłów)
+        // ale bez zależności od `show_node_picker` – zawsze widoczny.
+        // Jeśli chcesz ukrywać panel, dodaj warunek.
+        let query = self.search_query.to_lowercase();
+
+        let search = text_input("Szukaj węzłów...", &self.search_query)
+            .on_input(Message::SearchChanged)
+            .padding([6, 10])
+            .size(13);
+
+        let mut items: Vec<Element<Message>> = vec![];
+
+        for category in NodeCategory::all() {
+            let nodes: Vec<_> = category
+                .nodes()
+                .into_iter()
+                .filter(|k| query.is_empty() || k.label().to_lowercase().contains(&query))
+                .collect();
+
+            if nodes.is_empty() {
+                continue;
+            }
+
+            let cat_color = category.color();
+            let cat_header = container(text(category.label()).size(11).color(Color::WHITE))
+                .padding([3, 8])
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(cat_color)),
+                    border: iced::Border {
+                        radius: 3.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+
+            items.push(cat_header.into());
+
+            for kind in nodes {
+                let label = kind.label();
+                let world_pos = self.canvas_state.screen_to_world(Point::new(
+                    self.canvas_bounds.width * 0.5 - NODE_WIDTH * 0.5,
+                    self.canvas_bounds.height * 0.5,
+                ));
+                let kind_clone = kind.clone();
+                let btn = button(text(label).size(12))
+                    .padding([5, 12])
+                    .width(Length::Fill)
+                    .on_press(Message::AddNode(kind_clone, world_pos))
+                    .style(button::secondary);
+
+                items.push(btn.into());
+            }
+
+            items.push(Space::new().height(Length::Fixed(4.0)).into());
+        }
+
+        let content = scrollable(column(items).spacing(2).padding([4, 6])).height(Length::Fill);
+
+        let panel = container(
+            column![
+                container(text("Węzły").size(14).color(THEME.text))
+                    .padding([8, 0])
+                    .width(Length::Fill),
+                search,
+                Space::new().height(Length::Fixed(6.0)),
+                content,
+            ]
+            .spacing(0),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG_SECO)),
+            border: iced::Border {
+                color: SEPA_CO,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        });
+
+        panel.into()
+    }
+
+    fn create_splitter(&self, side: ResizeSide) -> Element<'_, Message> {
+        let is_active = matches!(&self.resize_state, Some(state) if state.side == side);
+    
+        // Ustaw preferowaną szerokość widocznego paska (np. 4.0)
+        let visible_width = 1.5;
+        // Obszar klikalny może być nieco szerszy dla wygody (np. 8.0)
+        let hit_area_width = 2.;
+    
+        container(
+            mouse_area(
+                container(Space::new())
+                    .width(Length::Fixed(visible_width))
+                    .height(Length::Fill)
+                    .style(move |_theme| {
+                        let base_color = if is_active {
+                            Color::from_rgb(0.7, 0.8, 1.0)
+                        } else {
+                            Color::TRANSPARENT
+                        };
+                        container::Style {
+                            background: Some(iced::Background::Color(base_color)),
+                            ..Default::default()
+                        }
+                    })
+            )
+            .on_press(Message::ResizeSplitterPressed(side.clone()))
+            .on_release(Message::ResizeSplitterReleased)
+            .interaction(iced::mouse::Interaction::ResizingHorizontally)
+        )
+        .width(Length::Fixed(hit_area_width)) // obszar łapania szerszy niż pasek
+        .height(Length::Fill)
         .into()
+    }
+
+    fn view_right_panel(&self) -> Element<'_, Message> {
+        // Inspektor właściwości – wyświetl informacje o zaznaczonych węzłach
+        let selected_ids = self.graph.selected_ids();
+        let content: Element<_> = if selected_ids.len() == 1 {
+            let id = selected_ids[0];
+            if let Some(node) = self.graph.nodes.get(&id) {
+                // Przykładowe informacje o węźle
+                column![
+                    text(format!("Węzeł: {}", node.kind.label())).size(14),
+                    text(format!("ID: {}", id)),
+                    text(format!(
+                        "Pozycja: ({:.1}, {:.1})",
+                        node.pos().x,
+                        node.pos().y
+                    )),
+                    text(format!("Wejścia: {}", node.inputs.len())),
+                    text(format!("Wyjścia: {}", node.outputs.len())),
+                ]
+                .spacing(8)
+                .padding(10)
+                .into()
+            } else {
+                text("Brak danych").into()
+            }
+        } else if selected_ids.len() > 1 {
+            text(format!("Zaznaczonych węzłów: {}", selected_ids.len())).into()
+        } else {
+            text("Nic nie zaznaczono").into()
+        };
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG_SECO)),
+                border: iced::Border {
+                    color: SEPA_CO,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     fn draw_panel(&self, pane: &Pane) -> Element<'_, Message> {
@@ -2702,7 +2953,7 @@ impl OnyxApp {
         let toolbar = self.view_toolbar();
         let canvas = self.view_canvas();
         let sidebar = self.view_sidebar();
-    
+
         let main_row = row![
             canvas,
             if self.show_node_picker {
@@ -2713,13 +2964,13 @@ impl OnyxApp {
         ]
         .spacing(0)
         .height(Length::Fill);
-    
+
         let canvas_layer: Element<_> = if let Some(qc) = &self.quick_connect {
             stack![main_row, self.view_quick_connect_menu(qc)].into()
         } else {
             main_row.into()
         };
-    
+
         let viewport = Rectangle::new(
             self.canvas_state.screen_to_world(Point::ORIGIN),
             Size::new(
@@ -2727,7 +2978,7 @@ impl OnyxApp {
                 self.canvas_bounds.height / self.canvas_state.zoom,
             ),
         );
-    
+
         let minimap: Element<'_, Message> = if self.show_minimap {
             container(
                 Canvas::new(MinimapCanvas {
@@ -2756,13 +3007,11 @@ impl OnyxApp {
         } else {
             Space::new().into()
         };
-    
+
         let canvas_with_minimap = stack![canvas_layer, minimap];
-    
+
         // Zwracamy tylko toolbar i obszar roboczy – status przeniesiony do głównego widoku
-        column![toolbar, canvas_with_minimap]
-            .spacing(0)
-            .into()
+        column![toolbar, canvas_with_minimap].spacing(0).into()
     }
 
     fn view_toolbar(&self) -> Element<'_, Message> {
